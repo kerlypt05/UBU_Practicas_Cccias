@@ -1,0 +1,12 @@
+{
+  "aplicativo": "Análisis alveolar de miga · PR-3",
+  "version": "1.0",
+  "fecha": "2026-10-23",
+  "archivo": "aplicativo_analisis_alveolar_PR3.py",
+  "cambios": [
+    "Primera versión publicada para los estudiantes.",
+    "Blanco control y validación por réplicas; grupos y réplicas con nombre libre.",
+    "Comparación entre grupos con recorridos y Tukey HSD; % del área en alvéolos > 2 mm.",
+    "Reporte Hoja D · Miga en Word; descarga sin archivos CSV."
+  ]
+}
