@@ -72,7 +72,8 @@ PUERTA = """<!doctype html>
 (function(){
   "use strict";
   const D = __DATOS__;
-  const CLAVE = "ubu9057-clave";
+  // Cada espacio (repositorio) guarda su clave por separado: comparten dominio en github.io
+  const CLAVE = "ubu9057-clave:" + (location.pathname.split("/")[1] || "raiz");
   const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
   const leer = st => { try { return st.getItem(CLAVE); } catch (_) { return null; } };
   const guardar = (st, v) => { try { st.setItem(CLAVE, v); } catch (_) {} };
@@ -99,6 +100,11 @@ PUERTA = """<!doctype html>
       btn.disabled = false; btn.textContent = "Entrar";
     }
   });
+  // «?salir» borra la clave recordada y muestra el formulario
+  if (new URLSearchParams(location.search).has("salir")) {
+    borrar(sessionStorage); borrar(localStorage);
+    try { history.replaceState(null, "", location.pathname); } catch (_) {}
+  }
   const guardada = leer(sessionStorage) || leer(localStorage);
   if (guardada) {
     btn.disabled = true; btn.textContent = "Abriendo…";
