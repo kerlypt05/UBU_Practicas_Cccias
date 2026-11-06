@@ -24,6 +24,6 @@ El material de apoyo a las clases teóricas está en otro espacio, con su propia
 
 - **Cifrar o cambiar la clave:** `python3 herramientas/cifrar_paginas.py --fuentes CARPETA_FUENTES/practicas --salida . --clave "CLAVE" --tema azul`
 - **Actualizar la guía o el libro de registro del aplicativo de miga:** sustituir `practicas/pr3-miga/descargas/*.pdf` y `*.xlsx` en la carpeta de fuentes (mismo nombre), ejecutar `python3 _generar_paginas.py` y volver a cifrar.
-- **Nueva versión del aplicativo de miga:** ver `pr3-miga/CHANGELOG.md` (el código no se cifra).
+- **Nueva versión del aplicativo de miga:** ver `pr3-miga/CHANGELOG.md` (el código no se cifra). Versión publicada: 1.1 (06/11/2026).
 
 Requisito: Python 3 con `pip install cryptography`.
