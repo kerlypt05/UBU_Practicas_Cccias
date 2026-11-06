@@ -15,7 +15,7 @@ El material de apoyo a las clases teóricas está en otro espacio, con su propia
 
 ## Organización
 
-- Cada recurso tiene su carpeta con una página de acceso (`index.html`); el simulador, además, `simulador.html`. La guía del aplicativo de miga (PDF y Word) va dentro de su página de acceso.
+- Cada recurso tiene su carpeta con una página de acceso (`index.html`); el simulador, además, `simulador.html`. La guía del aplicativo de miga (PDF) y el libro de registro (Excel) van dentro de su página de acceso.
 - Las páginas están **cifradas** (AES-256-GCM con clave derivada por PBKDF2). Las fuentes en claro se conservan fuera del repositorio.
 - El código del aplicativo de miga (`pr3-miga/aplicativo_analisis_alveolar_PR3.py`), su cuaderno de Colab y `version.json` quedan **abiertos**: el cuaderno los descarga desde aquí al ejecutarse.
 - `assets/logo_ubu.png`: logo de la Universidad de Burgos.
@@ -23,7 +23,7 @@ El material de apoyo a las clases teóricas está en otro espacio, con su propia
 ## Mantenimiento
 
 - **Cifrar o cambiar la clave:** `python3 herramientas/cifrar_paginas.py --fuentes CARPETA_FUENTES/practicas --salida . --clave "CLAVE" --tema azul`
-- **Actualizar la guía del aplicativo de miga:** sustituir `practicas/pr3-miga/descargas/*.docx` y `*.pdf` en la carpeta de fuentes (mismo nombre), ejecutar `python3 _generar_paginas.py` y volver a cifrar.
+- **Actualizar la guía o el libro de registro del aplicativo de miga:** sustituir `practicas/pr3-miga/descargas/*.pdf` y `*.xlsx` en la carpeta de fuentes (mismo nombre), ejecutar `python3 _generar_paginas.py` y volver a cifrar.
 - **Nueva versión del aplicativo de miga:** ver `pr3-miga/CHANGELOG.md` (el código no se cifra).
 
 Requisito: Python 3 con `pip install cryptography`.

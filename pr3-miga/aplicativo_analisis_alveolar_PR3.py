@@ -841,10 +841,16 @@ def html_validacion(val, titulo, nota_final=True):
 REGISTRO_DIR = "registro_sesion_PR3"
 REG_REPLICAS = os.path.join(REGISTRO_DIR, "replicas.csv")
 REG_BLANCO = os.path.join(REGISTRO_DIR, "blanco.json")
-VARS_COMP = [("area_alveolar_%", "Área alveolar (%)"), ("densidad_alv_cm2", "Densidad (alv/cm²)"),
+# Orden de lectura del paso 4. La DENSIDAD ALVEOLAR encabeza la comparación: es la variable con la
+# que el estudiante discrimina la fórmula (cuántos alvéolos sostiene la miga), mientras que el área
+# alveolar dice qué fracción de la superficie ocupan. Las dos se presentan siempre juntas: muchos
+# alvéolos pequeños y pocos alvéolos grandes pueden dar la misma área.
+VARS_COMP = [("densidad_alv_cm2", "Densidad (alv/cm²)"), ("area_alveolar_%", "Área alveolar (%)"),
              ("d50_area_mm", "D50 por área (mm)"), ("feret_p90_mm", "Feret P90 (mm)"),
              ("%_area_gt2mm", "% del área en alvéolos > 2 mm")]
-VAR_PRIMARIA = "area_alveolar_%"
+VAR_PRIMARIA = "densidad_alv_cm2"
+# Variables con las que se lee la heterogeneidad DENTRO de cada pieza (dispersión entre réplicas).
+VARS_HETERO = [("densidad_alv_cm2", "Densidad (alv/cm²)"), ("area_alveolar_%", "Área alveolar (%)")]
 # Distribución de tamaños por réplica: % acumulado del ÁREA alveolar en alvéolos con Feret ≤ x mm.
 CDF_X = np.round(np.arange(0.1, 3.0001, 0.1), 1)
 CDF_COLS = [f"cdf_area_{x:.1f}" for x in CDF_X]
@@ -1009,68 +1015,85 @@ def blanco_guardar(d):
 
 
 # ---------- Comparación entre grupos ----------
-# Dos criterios complementarios, con la réplica como unidad (nunca el alvéolo: los alvéolos de una
-# misma foto no son independientes entre sí):
-#   1) Regla del guion: dos grupos difieren si los recorridos (mín-máx) de sus réplicas no se
-#      solapan. Con 3 frente a 3 réplicas equivale a la prueba exacta de Mann-Whitney con U = 0:
-#      p = 0,10 bilateral, el valor más bajo que 3 réplicas pueden dar. No corrige por comparaciones
-#      múltiples: con k grupos hay k(k-1)/2 pares y, si no hubiera ninguna diferencia real, cabría
-#      esperar un 10 % de «distintas» por azar.
-#   2) ANOVA de un factor + Tukey HSD: usa la variabilidad de todas las réplicas a la vez (más grados
-#      de libertad) y controla el error del conjunto de comparaciones (α = 0,05). Supone normalidad
-#      y varianzas parecidas, que con 3 réplicas no se pueden comprobar.
-ALFA = 0.05
+# La unidad es la RÉPLICA, nunca el alvéolo: los alvéolos de una misma foto no son independientes
+# entre sí. Con 3 réplicas de una sola pieza por grupo no cabe una prueba de significación que
+# merezca ese nombre, y declarar «significativo / no significativo» induce a leer la práctica como
+# un experimento de inferencia que no es. Por eso el aplicativo NO usa pruebas de hipótesis ni
+# letras de agrupación. Presenta:
+#   1) MEDIA ± DE de cada grupo, con las réplicas a la vista: el efecto de la fórmula.
+#   2) CV entre réplicas de cada grupo: la heterogeneidad que introduce la técnica dentro de una
+#      misma pieza. Es la segunda lectura de la práctica y no depende de comparar grupos.
+#   3) LSD de Fisher como REGLA DE LECTURA, no como criterio de decisión: la distancia mínima que
+#      dos medias deben guardar para que su separación supere la variabilidad entre réplicas de
+#      esta misma sesión. Se dibuja como una barra-patrón junto a las medias. Es deliberadamente
+#      permisiva —no corrige por comparar varios pares a la vez—, que es justo lo que se pide de un
+#      recurso docente: que el estudiante vea gradación y la discuta, no que el programa dictamine.
+#      LSD = t(1 − α/2, gl) · √(CME · (1/nA + 1/nB)), con CME = varianza común dentro de grupo y
+#      gl = N − k. La razón |diferencia| / LSD se da como número continuo.
+#   4) El solapamiento de recorridos se conserva como DATO descriptivo, porque es la regla que
+#      recoge la Hoja E del libro de registro, pero ya no emite veredicto.
+ALFA = 0.05                  # nivel del cuantil t con que se construye la LSD (regla de lectura)
 P_RECORRIDOS = 0.10          # p exacta de la regla de recorridos con 3 frente a 3 réplicas
+RAZON_BANDAS = [(0.0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, np.inf)]   # |dif| / LSD
+RAZON_COLOR = ["#eceae4", "#dbe8f5", "#9dc3e6", "#2a78d6"]
+RAZON_ETIQ = ["< 0,5 × LSD", "0,5–1 × LSD", "1–2 × LSD", "≥ 2 × LSD"]
 PALETA_GRUPOS = ["#2a78d6", "#e8702a", "#2e9e5b", "#c23b5a", "#7a4fc2", "#8a6d1f", "#1aa3a3",
                  "#d1569c", "#5b6b7a", "#a33b1f", "#3f7f2a", "#4060a8"]
 
 
-def _tukey(muestras):
-    """Matriz de p ajustados de Tukey HSD, o None si no se puede calcular."""
+def _t_critico(gl, alfa=ALFA):
     try:
-        from scipy.stats import tukey_hsd
-        if len(muestras) < 2 or any(len(m) < 2 for m in muestras):
-            return None
-        if sum(len(m) for m in muestras) - len(muestras) < 2:
-            return None
-        if all(np.ptp(m) == 0 for m in muestras):
-            return None
-        return np.asarray(tukey_hsd(*muestras).pvalue)
-    except Exception:
-        return None
+        from scipy.stats import t as _t
+        return float(_t.ppf(1 - alfa / 2, gl))
+    except Exception:              # sin scipy: basta para una regla de lectura
+        return {1: 12.71, 2: 4.30, 3: 3.18, 4: 2.78, 5: 2.57, 6: 2.45,
+                7: 2.36, 8: 2.31, 9: 2.26, 10: 2.23}.get(int(gl), 2.10)
 
 
-def _anova(muestras):
-    try:
-        from scipy.stats import f_oneway
-        return float(f_oneway(*muestras).pvalue)
-    except Exception:
+def lsd_par(xa, xb, alfa=ALFA):
+    """LSD de Fisher del par, con la varianza común de LOS DOS grupos comparados (gl = nA + nB − 2).
+
+    Se calcula par a par y no con todos los grupos a la vez a propósito. Agrupar la varianza de
+    todos los productos haría que una sola pieza irregular ensanchase la regla para TODAS las
+    comparaciones, incluidas las de dos piezas uniformes: justo lo contrario de lo que necesita un
+    recurso docente. Par a par, dos piezas uniformes se distinguen con poco, y un par en el que una
+    de las dos es irregular exige más separación —lo que enlaza la lectura con la heterogeneidad
+    por técnica, que es la otra pregunta de la práctica."""
+    xa = np.asarray(xa, float); xb = np.asarray(xb, float)
+    na, nb = len(xa), len(xb)
+    if na < 2 or nb < 2:
         return np.nan
+    gl = na + nb - 2
+    sp2 = float(((na - 1) * xa.var(ddof=1) + (nb - 1) * xb.var(ddof=1)) / gl)
+    if sp2 <= 0:
+        return 0.0
+    return float(_t_critico(gl, alfa) * np.sqrt(sp2 * (1.0 / na + 1.0 / nb)))
 
 
-def letras_grupo(medias, distintos):
-    """Letras de agrupación (algoritmo de inserción y absorción). Dos grupos que comparten letra no
-    se distinguen. medias: {grupo: media}; distintos: conjunto de pares (a, b) significativos."""
-    orden = sorted(medias, key=lambda g: -medias[g])
-    conjuntos = [set(orden)]
-    for a, b in itertools.combinations(orden, 2):
-        if (a, b) not in distintos and (b, a) not in distintos:
-            continue
-        nuevos = []
-        for s in conjuntos:
-            if a in s and b in s:
-                nuevos += [s - {a}, s - {b}]
-            else:
-                nuevos.append(s)
-        nuevos = [s for s in nuevos if s]
-        conjuntos = [s for i, s in enumerate(nuevos)
-                     if not any((s < t) or (s == t and j < i) for j, t in enumerate(nuevos) if j != i)]
-    conjuntos.sort(key=lambda s: min(orden.index(g) for g in s))
-    letras = {g: "" for g in orden}
-    for i, s in enumerate(conjuntos):
-        for g in s:
-            letras[g] += "abcdefghijklmnopqrstuvwxyz"[i % 26]
-    return letras
+def lsd_variable(datos, gs, v, alfa=ALFA):
+    """LSD de cada par de una variable, más la LSD típica (mediana) que se dibuja como patrón."""
+    if len(gs) < 2:
+        return None
+    pares = {}
+    for a, b in itertools.combinations(gs, 2):
+        pares[(a, b)] = lsd_par(datos[a][v], datos[b][v], alfa)
+    vals = [x for x in pares.values() if np.isfinite(x)]
+    if not vals:
+        return None
+    des = [float(np.std(datos[g][v], ddof=1)) for g in gs if len(datos[g][v]) > 1]
+    n = [len(datos[g][v]) for g in gs]
+    return dict(pares=pares, tipica=float(np.median(vals)),
+                de_tipica=float(np.median(des)) if des else np.nan,
+                gl_tipico=int(round(float(np.mean(n)))) * 2 - 2, alfa=alfa)
+
+
+def _banda_razon(r):
+    if r is None or not np.isfinite(r):
+        return None
+    for i, (lo, hi) in enumerate(RAZON_BANDAS):
+        if lo <= r < hi:
+            return i
+    return len(RAZON_BANDAS) - 1
 
 
 def comparar_grupos(reg, blanco, grupos=None, ruta_base=None):
@@ -1081,33 +1104,60 @@ def comparar_grupos(reg, blanco, grupos=None, ruta_base=None):
     usables = [g for g in grupos if estado[g] != "NO VÁLIDO"]
     datos = {g: {v: reg[reg.muestra == g][v].astype(float).dropna().values for v, _ in VARS_COMP} for g in grupos}
 
-    # Resumen por grupo
+    # Resumen por grupo: media ± DE, CV y recorrido. Sin letras de agrupación.
     filas = []
     for g in grupos:
         f = {"Grupo": g, "n réplicas": int((reg.muestra == g).sum()), "Estado": estado[g]}
         for v, nom in VARS_COMP:
             x = datos[g][v]
+            de = x.std(ddof=1) if len(x) > 1 else np.nan
             f[f"{nom} · media"] = round(x.mean(), 2) if len(x) else np.nan
-            f[f"{nom} · DE"] = round(x.std(ddof=1), 2) if len(x) > 1 else np.nan
+            f[f"{nom} · DE"] = round(de, 2) if len(x) > 1 else np.nan
+            f[f"{nom} · CV (%)"] = (round(100 * de / x.mean(), 1)
+                                    if len(x) > 1 and x.mean() else np.nan)
             f[f"{nom} · mín"] = round(x.min(), 2) if len(x) else np.nan
             f[f"{nom} · máx"] = round(x.max(), 2) if len(x) else np.nan
         filas.append(f)
     resumen = pd.DataFrame(filas)
 
-    # Pruebas por variable
-    tukey, anova, letras = {}, {}, {}
+    # Regla de lectura: la LSD de cada par, más la LSD típica que se dibuja como patrón.
+    lsd = {}
     for v, nom in VARS_COMP:
-        muestras = [datos[g][v] for g in usables if len(datos[g][v])]
-        gs = [g for g in usables if len(datos[g][v])]
-        P = _tukey(muestras)
-        tukey[v] = {(a, b): P[i, j] for i, a in enumerate(gs) for j, b in enumerate(gs) if i != j} if P is not None else {}
-        anova[v] = _anova(muestras) if len(muestras) >= 2 else np.nan
-        dist = {(a, b) for (a, b), p in tukey[v].items() if p < ALFA}
-        letras[v] = letras_grupo({g: datos[g][v].mean() for g in gs}, dist) if tukey[v] else {}
-    for v, nom in VARS_COMP:
-        resumen[f"{nom} · letras"] = [letras[v].get(g, "") for g in grupos]
+        gs = [g for g in usables if len(datos[g][v]) > 1]
+        lsd[v] = lsd_variable(datos, gs, v)
 
-    # Pares
+    # Heterogeneidad entre réplicas: lo que aporta la TÉCNICA dentro de una misma pieza.
+    het = []
+    for g in grupos:
+        f = {"Grupo": g, "Estado": estado[g]}
+        for v, nom in VARS_HETERO:
+            x = datos[g][v]
+            de = x.std(ddof=1) if len(x) > 1 else np.nan
+            cv = 100 * de / x.mean() if len(x) > 1 and x.mean() else np.nan
+            f[f"{nom} · DE"] = round(de, 2) if np.isfinite(de) else np.nan
+            f[f"{nom} · CV (%)"] = round(cv, 1) if np.isfinite(cv) else np.nan
+            f[f"{nom} · recorrido"] = round(x.max() - x.min(), 2) if len(x) > 1 else np.nan
+        # La lectura mira las dos variables: cada una tiene su propio límite de CV en la Hoja D.
+        veredictos = []
+        for v, nom in VARS_HETERO:
+            cv = f.get(f"{nom} · CV (%)", np.nan); lim = CV_MAX.get(v, np.nan)
+            veredictos.append(None if not (np.isfinite(cv) and np.isfinite(lim)) else bool(cv <= lim))
+        corto = {"densidad_alv_cm2": "densidad", "area_alveolar_%": "área alveolar"}
+        if any(x is None for x in veredictos):
+            f["Lectura"] = "—"
+        elif all(veredictos):
+            f["Lectura"] = "Réplicas homogéneas en densidad y en área alveolar"
+        elif not any(veredictos):
+            f["Lectura"] = "Réplicas dispersas en densidad y en área alveolar"
+        else:
+            ok = [corto[v] for (v, _), b in zip(VARS_HETERO, veredictos) if b]
+            no = [corto[v] for (v, _), b in zip(VARS_HETERO, veredictos) if not b]
+            f["Lectura"] = f"Homogéneas en {ok[0]}; dispersas en {no[0]}"
+        f["_ok"] = None if any(x is None for x in veredictos) else all(veredictos)
+        het.append(f)
+    het = pd.DataFrame(het)
+
+    # Pares: magnitud de la separación, medida en unidades de LSD. Sin veredicto de significación.
     pares = []
     for a, b in itertools.combinations(grupos, 2):
         for v, nom in VARS_COMP:
@@ -1115,87 +1165,179 @@ def comparar_grupos(reg, blanco, grupos=None, ruta_base=None):
             if not len(xa) or not len(xb):
                 continue
             solape = xa.min() <= xb.max() and xb.min() <= xa.max()
-            p = tukey[v].get((a, b), np.nan)
+            dif = xa.mean() - xb.mean()
+            L = lsd[v] or {}
+            Lp = L.get("pares", {}).get((a, b), L.get("pares", {}).get((b, a), np.nan))
+            razon = abs(dif) / Lp if np.isfinite(Lp) and Lp > 0 else np.nan
             ea, eb_ = estado[a], estado[b]
             if "NO VÁLIDO" in (ea, eb_):
                 lectura = "No interpretable: algún grupo no es válido"
             elif "PENDIENTE" in (ea, eb_):
                 lectura = "Pendiente: falta validar el blanco control"
+            elif not np.isfinite(razon):
+                lectura = "Sin LSD calculable"
             else:
-                sig = (not np.isnan(p)) and p < ALFA
-                if not solape and sig:
-                    lectura = "Diferencia sólida (los dos criterios)"
-                elif not solape or sig:
-                    lectura = "Indicio de diferencia (un solo criterio)"
-                else:
-                    lectura = "No se puede afirmar que difieran"
-                if "REVISAR" in (ea, eb_) and not lectura.startswith("No se"):
+                lectura = ("Separación por encima de la LSD" if razon >= 1
+                           else "Separación por debajo de la LSD")
+                if "REVISAR" in (ea, eb_):
                     lectura += " · con reservas"
             pares.append({"Grupo A": a, "Grupo B": b, "Variable": nom,
                           "Media A": round(xa.mean(), 2), "Media B": round(xb.mean(), 2),
-                          "Diferencia A − B": round(xa.mean() - xb.mean(), 2),
+                          "Diferencia A − B": round(dif, 2),
+                          "LSD": round(Lp, 2) if np.isfinite(Lp) else np.nan,
+                          "Diferencia / LSD": round(razon, 2) if np.isfinite(razon) else np.nan,
                           "Recorridos": "solapados" if solape else "sin solape",
-                          "Tukey p ajustado": round(p, 3) if not np.isnan(p) else np.nan,
                           "Lectura": lectura})
     pares = pd.DataFrame(pares)
     n_pares = len(grupos) * (len(grupos) - 1) // 2
-    info = dict(n_grupos=len(grupos), n_pares=n_pares, falsos_esperados=round(P_RECORRIDOS * n_pares, 1),
-                anova=anova, tukey_ok=any(tukey.values()))
+    info = dict(n_grupos=len(grupos), n_pares=n_pares, lsd=lsd, var_primaria=VAR_PRIMARIA,
+                nombre_primaria=dict(VARS_COMP)[VAR_PRIMARIA])
 
-    figs = {"variables": figura_variables(reg, grupos, datos, estado, letras),
-            "distribucion": figura_distribucion(reg, grupos, estado),
-            "matriz": figura_matriz(grupos, datos, estado, tukey)}
+    figs = {"variables": figura_variables(reg, grupos, datos, estado, lsd),
+            "heterogeneidad_rep": figura_heterogeneidad(grupos, datos, estado, compacto=True),
+            "principales": figura_variables(reg, grupos, datos, estado, lsd, vars_=VARS_HETERO, compacto=True),
+            "heterogeneidad": figura_heterogeneidad(grupos, datos, estado),
+            "matriz": figura_matriz(grupos, datos, estado, lsd),
+            "distribucion": figura_distribucion(reg, grupos, estado)}
     archivos = []
     if ruta_base:
-        excel_simple(ruta_base + "_resultados.xlsx", {"Pares": pares, "Resumen por grupo": resumen})
+        excel_simple(ruta_base + "_resultados.xlsx",
+                     {"Resumen por grupo": resumen, "Heterogeneidad": het.drop(columns=["_ok"]),
+                      "Pares": pares})
         archivos = [ruta_base + "_resultados.xlsx"]
         for k, f in figs.items():
-            if f is not None:
+            if f is not None and k not in ("principales", "heterogeneidad_rep"):
                 f.savefig(ruta_base + f"_figura_{k}.png", dpi=140, facecolor="white"); archivos.append(ruta_base + f"_figura_{k}.png")
     configs = reg.configuracion.dropna().unique()
     res_g = reg.groupby("muestra").escala_px_mm.median().dropna()
     info["resoluciones"] = res_g.round(1).to_dict()
     info["resolucion_desigual"] = bool(len(res_g) > 1 and res_g.max() / res_g.min() - 1 > 0.05)
-    return dict(resumen=resumen, pares=pares, figs=figs, archivos=archivos, configs=configs, info=info)
+    return dict(resumen=resumen, heterogeneidad=het, pares=pares, figs=figs, archivos=archivos,
+                configs=configs, info=info)
 
 
 def _color_estado(e, base):
     return "#a1251f" if e == "NO VÁLIDO" else ("#9a988f" if e == "PENDIENTE" else base)
 
 
-def figura_variables(reg, grupos, datos, estado, letras):
-    """Una gráfica por variable. Orden fijo por el área alveolar (de mayor a menor) para leer todas
-    igual. Puntos = réplicas; barra = recorrido; raya = media; letras = Tukey HSD."""
+def _dec(valores):
+    """Decimales con que se rotula una variable, según su magnitud (1,38 mm frente a 65,2 alv/cm²)."""
+    m = max((abs(float(x)) for x in valores if np.isfinite(x)), default=1.0)
+    return 2 if m < 10 else 1
+
+
+def _patron_lsd(a, x, y0, L, d=1, color="#c00000"):
+    """Barra-patrón de la LSD: un segmento de la longitud que una diferencia debe superar."""
+    a.plot([x, x], [y0, y0 + L], color=color, lw=2.6, solid_capstyle="butt", zorder=5, clip_on=False)
+    for y in (y0, y0 + L):
+        a.plot([x - 0.10, x + 0.10], [y, y], color=color, lw=1.4, zorder=5, clip_on=False)
+    a.text(x + 0.16, y0 + L / 2, f"LSD\ntípica\n{_es(L, d)}", ha="left", va="center", fontsize=8.2,
+           color=color, weight="bold", linespacing=1.2, clip_on=False)
+
+
+def figura_variables(reg, grupos, datos, estado, lsd, vars_=None, compacto=False):
+    """Una gráfica por variable: media ± DE con las réplicas a la vista y la barra-patrón de la LSD.
+    El orden de los grupos lo fija la variable primaria, para leer todos los paneles igual.
+    Sin barras: el eje no arranca en cero y una barra truncada exagera las diferencias."""
     orden = sorted(grupos, key=lambda g: -(datos[g][VAR_PRIMARIA].mean() if len(datos[g][VAR_PRIMARIA]) else -1e9))
-    nv = len(VARS_COMP); nc = 2; nf = int(np.ceil(nv / nc))
-    ancho = max(11, 1.1 * len(orden) * nc + 3)
+    vars_ = vars_ or VARS_COMP
+    nv = len(vars_); nc = 2; nf = int(np.ceil(nv / nc))
+    ancho = max(11, 1.25 * len(orden) * nc + 3.5)
     fig, axs = plt.subplots(nf, nc, figsize=(ancho, 4.3 * nf), squeeze=False)
     x = np.arange(len(orden)); rot = 30 if len(orden) > 4 or max(len(g) for g in orden) > 8 else 0
-    for k, (a, (v, nom)) in enumerate(zip(axs.flat, VARS_COMP)):
-        ymax = max((datos[g][v].max() for g in orden if len(datos[g][v])), default=1)
-        ymin = min((datos[g][v].min() for g in orden if len(datos[g][v])), default=0)
+    for k, (a, (v, nom)) in enumerate(zip(axs.flat, vars_)):
+        L = (lsd.get(v) or {}).get("tipica", np.nan)
+        vals = [datos[g][v] for g in orden if len(datos[g][v])]
+        if not vals:
+            a.axis("off"); continue
+        d = _dec(np.concatenate(vals))
+        ymax = max(y.max() for y in vals); ymin = min(y.min() for y in vals)
+        for g in orden:
+            y = datos[g][v]
+            if len(y) > 1:
+                m, de = y.mean(), y.std(ddof=1)
+                ymax = max(ymax, m + de); ymin = min(ymin, m - de)
+        rango = ymax - ymin + 1e-9
         for i, g in enumerate(orden):
             y = datos[g][v]
             if not len(y):
                 continue
             c = _color_estado(estado[g], "#2a78d6")
-            a.vlines(i, y.min(), y.max(), color=c, lw=9, alpha=0.25)
-            a.scatter(np.full(len(y), i) + np.linspace(-0.06, 0.06, len(y)), y, color=c, s=34, zorder=3)
-            a.hlines(y.mean(), i - 0.22, i + 0.22, color=TINTA, lw=1.8, zorder=4)
-            if letras[v].get(g):
-                a.text(i, ymax + 0.06 * (ymax - ymin + 1e-9), letras[v][g], ha="center", va="bottom",
-                       fontsize=11, weight="bold", color=TINTA)
+            m = y.mean(); de = y.std(ddof=1) if len(y) > 1 else 0.0
+            if de > 0:
+                a.errorbar(i, m, yerr=de, color=c, lw=1.9, capsize=9, capthick=1.9, zorder=3)
+            a.scatter(np.full(len(y), i) + np.linspace(-0.13, 0.13, len(y)), y, color="#ffffff",
+                      edgecolors=c, linewidths=1.3, s=38, zorder=4)
+            a.scatter([i], [m], marker="D", s=74, color=c, edgecolors="#ffffff", linewidths=1.4, zorder=6)
+            a.text(i, max(m + de, y.max()) + 0.055 * rango, f"{_es(m, d)}\n± {_es(de, d)}",
+                   ha="center", va="bottom", fontsize=8.6, color=TINTA, linespacing=1.15)
+        hueco = 0.62 if np.isfinite(L) and L > 0 else 0.0
         a.set_xticks(x); a.set_xticklabels(orden, rotation=rot, ha="right" if rot else "center", color=TINTA)
-        a.set_xlim(-0.6, len(orden) - 0.4); a.set_ylim(top=ymax + 0.2 * (ymax - ymin + 1e-9))
+        a.set_xlim(-0.6, len(orden) - 0.4 + hueco)
+        a.set_ylim(bottom=ymin - 0.16 * rango, top=ymax + 0.30 * rango)
+        if np.isfinite(L) and L > 0:
+            _patron_lsd(a, len(orden) - 0.18, ymin - 0.10 * rango, L, d)
         a.set_title(nom + (" · variable primaria" if v == VAR_PRIMARIA else ""), loc="left", fontsize=11.5,
                     color=TINTA, weight="bold" if v == VAR_PRIMARIA else "normal")
-        _limpiar(a)
+        _limpiar(a); a.grid(axis="y", color="#ecebe6", lw=0.8)
     for a in list(axs.flat)[nv:]:
         a.axis("off")
-    fig.suptitle("Comparación entre grupos · puntos = réplicas, barra = recorrido mín-máx, raya = media.\n"
-                 "Letras: grupos que comparten letra no difieren (Tukey HSD, α = 0,05). Gris = pendiente de blanco; "
-                 "rojo = no válido.", fontsize=11, x=0.01, ha="left", y=0.995, color=TINTA)
-    plt.tight_layout(rect=[0, 0, 1, 1 - 0.42 / (4.3 * nf)])
+    if compacto:
+        fig.suptitle("Rombo = media · bigote = ± DE · círculos = réplicas · barra roja = LSD típica (regla de lectura).",
+                     fontsize=10, x=0.01, ha="left", y=0.997, color=TINTA)
+        top = 0.42
+    else:
+        fig.suptitle("Comparación entre grupos · rombo = media, bigote = ± DE de las réplicas, círculos = cada réplica.\n"
+                     "La barra roja es la LSD típica: lo que dos medias deben separarse para destacar sobre la\n"
+                     "variabilidad entre réplicas. Cada par tiene la suya, en la tabla; es una regla de lectura,\n"
+                     "no un veredicto. Gris = pendiente del blanco control; rojo = grupo no válido.",
+                     fontsize=10.5, x=0.01, ha="left", y=0.997, color=TINTA)
+        top = 0.80
+    plt.tight_layout(rect=[0, 0, 1, 1 - top / (4.3 * nf)])
+    return fig
+
+
+def figura_heterogeneidad(grupos, datos, estado, compacto=False):
+    """Heterogeneidad DENTRO de cada grupo: CV entre las tres réplicas. Responde a la segunda
+    pregunta de la práctica —cuánta irregularidad introduce la técnica— y no depende de comparar
+    fórmulas: un grupo puede tener la media más alta y, a la vez, la miga más irregular."""
+    vs = [(v, nom) for v, nom in VARS_HETERO]
+    if not grupos:
+        return None
+    cvs = {v: {g: (100 * datos[g][v].std(ddof=1) / datos[g][v].mean()
+                   if len(datos[g][v]) > 1 and datos[g][v].mean() else np.nan) for g in grupos}
+           for v, _ in vs}
+    orden = sorted(grupos, key=lambda g: -(cvs[VAR_PRIMARIA][g] if np.isfinite(cvs[VAR_PRIMARIA][g]) else -1e9))
+    fig, axs = plt.subplots(1, len(vs), figsize=(6.2 * len(vs), max(3.2, 0.55 * len(orden) + 2.4)), squeeze=False)
+    for a, (v, nom) in zip(axs.flat, vs):
+        lim = CV_MAX.get(v, np.nan)
+        y = np.arange(len(orden))
+        val = [cvs[v][g] if np.isfinite(cvs[v][g]) else 0.0 for g in orden]
+        col = [_color_estado(estado[g], "#2a78d6" if (np.isfinite(cvs[v][g]) and cvs[v][g] <= lim) else "#e8702a")
+               for g in orden]
+        a.barh(y, val, color=col, alpha=0.85, height=0.58)
+        for i, g in enumerate(orden):
+            t = _es(cvs[v][g], 1) + " %" if np.isfinite(cvs[v][g]) else "—"
+            a.text(val[i] + 0.02 * max(max(val), lim), i, t, va="center", ha="left", fontsize=9, color=TINTA)
+        if np.isfinite(lim):
+            a.axvline(lim, color="#c00000", lw=1.4, ls="--")
+            a.text(lim, len(orden) - 0.35, f" límite {_es(lim, 0)} %", color="#c00000", fontsize=8.6,
+                   va="bottom", ha="left")
+        a.set_yticks(y); a.set_yticklabels(orden, color=TINTA); a.invert_yaxis()
+        a.set_xlim(0, max(max(val) * 1.30, lim * 1.30 if np.isfinite(lim) else 1))
+        a.set_xlabel("CV entre réplicas (%)", color=GRIS)
+        a.set_title(nom, loc="left", fontsize=11.5, color=TINTA,
+                    weight="bold" if v == VAR_PRIMARIA else "normal")
+        _limpiar(a); a.grid(axis="x", color="#ecebe6", lw=0.8)
+    if compacto:
+        fig.suptitle("Azul = dentro del límite de aceptación · naranja = por encima (la miga de la pieza no es uniforme).",
+                     fontsize=10, x=0.01, ha="left", y=0.995, color=TINTA)
+    else:
+        fig.suptitle("Heterogeneidad por técnica · dispersión entre las tres réplicas de una misma pieza.\n"
+                     "Azul = dentro del límite de aceptación; naranja = por encima: la miga de esa pieza no es "
+                     "uniforme y su media representa menos.",
+                     fontsize=10.5, x=0.01, ha="left", y=0.995, color=TINTA)
+    plt.tight_layout(rect=[0, 0, 1, 0.90])
     return fig
 
 
@@ -1243,23 +1385,29 @@ def figura_distribucion(reg, grupos, estado):
     return fig
 
 
-def figura_matriz(grupos, datos, estado, tukey):
-    """Matriz de pares para la variable primaria: color = p ajustado de Tukey; cifra = diferencia de
-    medias (fila − columna) en puntos de área alveolar; ≠ = recorridos sin solape."""
+def figura_matriz(grupos, datos, estado, lsd):
+    """Matriz de pares para la variable primaria. Cifra = diferencia de medias (fila − columna);
+    color = cuántas veces la LSD vale esa diferencia. No hay umbral de corte: el color es una escala
+    de magnitud, para que el estudiante vea la gradación y no una frontera."""
     v = VAR_PRIMARIA; n = len(grupos)
     if n < 2:
         return None
     from matplotlib.colors import ListedColormap, BoundaryNorm
-    M = np.full((n, n), np.nan)
+    M = np.full((n, n), np.nan); R = np.full((n, n), np.nan)
     for i, a in enumerate(grupos):
         for j, b in enumerate(grupos):
-            if i > j and (a, b) in tukey[v]:
-                p = tukey[v][(a, b)]
-                M[i, j] = 0 if p < 0.01 else (1 if p < ALFA else 2)
-    cmap = ListedColormap(["#1b6b3a", "#7cc49a", "#e6e4dd"]); cmap.set_bad("#ffffff")
-    lado = max(4.5, 0.95 * (n - 1) + 2.2)
-    fig, a = plt.subplots(figsize=(lado + 2, lado))
-    a.imshow(np.ma.masked_invalid(M[1:, :-1]), cmap=cmap, norm=BoundaryNorm([-0.5, 0.5, 1.5, 2.5], 3))
+            if i <= j or not len(datos[a][v]) or not len(datos[b][v]):
+                continue
+            P = (lsd.get(v) or {}).get("pares", {})
+            Lp = P.get((a, b), P.get((b, a), np.nan))
+            if np.isfinite(Lp) and Lp > 0:
+                R[i, j] = abs(datos[a][v].mean() - datos[b][v].mean()) / Lp
+                M[i, j] = _banda_razon(R[i, j])
+    cmap = ListedColormap(RAZON_COLOR); cmap.set_bad("#ffffff")
+    lado = max(4.5, 1.0 * (n - 1) + 2.2)
+    fig, a = plt.subplots(figsize=(lado + 2.6, lado))
+    a.imshow(np.ma.masked_invalid(M[1:, :-1]), cmap=cmap,
+             norm=BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], len(RAZON_COLOR)))
     for i, ga in enumerate(grupos):
         for j, gb in enumerate(grupos):
             if i <= j:
@@ -1267,24 +1415,24 @@ def figura_matriz(grupos, datos, estado, tukey):
             xa, xb = datos[ga][v], datos[gb][v]
             if not len(xa) or not len(xb):
                 continue
-            sin_solape = not (xa.min() <= xb.max() and xb.min() <= xa.max())
-            txt = f"{xa.mean() - xb.mean():+.1f}".replace(".", ",") + (" ≠" if sin_solape else "")
+            txt = f"{xa.mean() - xb.mean():+.1f}".replace(".", ",")
+            if np.isfinite(R[i, j]):
+                txt += f"\n{_es(R[i, j], 1)} × LSD"
             if "NO VÁLIDO" in (estado[ga], estado[gb]):
                 txt = "no válido"
-            a.text(j, i - 1, txt, ha="center", va="center", fontsize=10,
-                   color="white" if M[i, j] == 0 else TINTA, weight="bold" if sin_solape else "normal")
+            a.text(j, i - 1, txt, ha="center", va="center", fontsize=9.2, linespacing=1.3,
+                   color="white" if M[i, j] == len(RAZON_COLOR) - 1 else TINTA)
     a.set_xticks(range(n - 1)); a.set_xticklabels(grupos[:-1], rotation=30, ha="right", color=TINTA)
     a.set_yticks(range(n - 1)); a.set_yticklabels(grupos[1:], color=TINTA)
     for s in a.spines.values():
         s.set_visible(False)
     a.set_xticks(np.arange(-0.5, n - 1), minor=True); a.set_yticks(np.arange(-0.5, n - 1), minor=True)
     a.grid(which="minor", color="white", lw=2); a.tick_params(which="minor", length=0)
-    a.legend(handles=[Patch(color="#1b6b3a", label="p < 0,01"), Patch(color="#7cc49a", label="p < 0,05"),
-                      Patch(color="#e6e4dd", label="p ≥ 0,05 (sin diferencia)")],
-             loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=9, title="Tukey HSD",
-             title_fontsize=9)
-    a.set_title("Área alveolar: diferencia de medias (fila − columna, puntos %)\n≠ = recorridos de las réplicas "
-                "sin solape", loc="left", fontsize=11, color=TINTA)
+    a.legend(handles=[Patch(color=c, label=e) for c, e in zip(RAZON_COLOR, RAZON_ETIQ)],
+             loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=9,
+             title="Magnitud de la\nseparación", title_fontsize=9)
+    a.set_title(f"{dict(VARS_COMP)[VAR_PRIMARIA]}: diferencia de medias (fila − columna)\n"
+                "y cuántas veces la LSD vale esa diferencia", loc="left", fontsize=11, color=TINTA)
     plt.tight_layout()
     return fig
 
@@ -1301,10 +1449,10 @@ def html_tabla(df, resaltar=(), col_estado=None):
             estilo = "background:#ffffff;color:#1f2328"
             if c == col_estado and v in ESTILO_ESTADO:
                 f, t, i = ESTILO_ESTADO[v]; estilo = f"background:{f};color:{t};font-weight:700"; txt = f"{i} {v}"
-            elif isinstance(v, str) and v.startswith(("Distintas", "Diferencia sólida")):
-                estilo = "background:#e9f6ee;color:#1b6b3a;font-weight:600"
-            elif isinstance(v, str) and v.startswith("Indicio"):
-                estilo = "background:#fff6e5;color:#8a5300;font-weight:600"
+            elif isinstance(v, str) and v.startswith("Separación por encima"):
+                estilo = "background:#eaf1fa;color:#1c3f73;font-weight:600"
+            elif isinstance(v, str) and v.startswith(("Réplicas homogéneas", "Homogéneas en")):
+                estilo = "background:#f4f3ef;color:#1f2328"
             celdas += f"<td style='padding:4px 8px;{estilo}'>{txt}</td>"
         filas += f"<tr>{celdas}</tr>"
     return (f"<div style='overflow-x:auto;background:#ffffff'><table style='border-collapse:collapse;"
@@ -1409,14 +1557,16 @@ def analizar_muestra(rutas, muestra, opciones, salida="resultados", mostrar_cont
     except Exception as e:
         fallos.append(f"registro dentro del Excel ({e})")
     try:
-        reporte_hoja_d(base + "_reporte_Hoja_D_miga.docx", registro_cargar(), blanco, [muestra], comparar=False)
+        reporte_hoja_d_pdf(base + "_reporte_resultados_miga.pdf", registro_cargar(), blanco, [muestra], comparar=False)
+        reporte_hoja_d(base + "_reporte_resultados_miga.docx", registro_cargar(), blanco, [muestra], comparar=False)
         hechos.append("Reporte")
     except Exception as e:
-        fallos.append(f"reporte Hoja D ({e})")
+        fallos.append(f"reporte de resultados ({e})")
     if hechos:
         _html("Documentos generados: " + ", ".join(
             {"Excel": "libro Excel con tablas, validación y gráficos", "Word": "ficha técnica en Word (editable)",
-             "PDF": "ficha técnica en PDF", "Reporte": "reporte para la Hoja D · Miga (Word)"}[h] for h in hechos) + ". Se incluyen en el ZIP.", "ok")
+             "PDF": "ficha técnica en PDF",
+             "Reporte": "reporte de resultados · Miga (PDF y Word)"}[h] for h in hechos) + ". Se incluyen en el ZIP.", "ok")
     if fallos:
         _html("No se pudo generar: " + "; ".join(fallos) + ".", "aviso")
     return tabla_r, _zip(base), estado
@@ -2261,47 +2411,304 @@ def generar_informes(base, muestra, tabla, res, alv, alv_out, dg, opciones, avis
 
 
 # ============================================================
-#  REPORTE PARA LA HOJA D · MIGA (Word, formato UBU)
+#  REPORTE PARA LA HOJA D · MIGA
+#  Un solo generador de contenido (_bloques_hoja_d) y dos salidas: PDF y Word. Así la versión que
+#  el estudiante imprime y la que edita dicen exactamente lo mismo.
+#  El orden de las columnas es el de la Hoja D · Miga del libro de registro:
+#     Escala px/mm · Área alveolar % · Densidad alv/cm² · Feret P90 mm · % < 0,5 mm · % 0,5-1 mm
+#  Las columnas que el libro calcula solo (media, mínimo, máximo, recorrido, CV) se dan igualmente,
+#  marcadas como «lo calcula el libro», para que el estudiante compruebe que ha tecleado bien.
 # ============================================================
 COLS_HOJA_D = [("escala_foto_px_mm", "Escala (px/mm)", 2), ("area_alveolar_%", "Área alveolar (%)", 1),
                ("densidad_alv_cm2", "Densidad (alv/cm²)", 1), ("feret_p90_mm", "Feret P90 (mm)", 2)]
+# Controles de calidad de la Hoja D (filas «CONTROL DE CALIDAD DE LA MEDIDA»).
+CTRL_HOJA_D = [("area_alveolar_%", "CV del área alveolar"), ("densidad_alv_cm2", "CV de la densidad alveolar"),
+               ("escala_foto_px_mm", "CV de la escala")]
+BANDAS_GRUPO = [("4F81BD", "EEF2F6"), ("C00000", "FBE0D6"), ("8F1D1D", "FDF1CF"),
+                ("2E7D32", "E6F2E6"), ("6A1B9A", "F1E7F7")]
 
 
 def _cols_hoja_d():
     nc = _nombres_clase()
-    return COLS_HOJA_D + [(f"% {nc[0]}", "% finos < 0,5 mm", 1), (f"% {nc[1]}", "% medios 0,5–1 mm", 1),
-                          ("%_area_gt2mm", f"% del área en alvéolos > {_es(LIM_MUY_GRANDES_MM, 0)} mm", 1)]
+    return COLS_HOJA_D + [(f"% {nc[0]}", "% < 0,5 mm", 1), (f"% {nc[1]}", "% 0,5–1 mm", 1),
+                          ("%_area_gt2mm", f"% área en alv. > {_es(LIM_MUY_GRANDES_MM, 0)} mm", 1)]
 
 
+def _fmt_hd(v, d=1):
+    return "—" if v is None or (isinstance(v, float) and np.isnan(v)) else _es(v, d)
+
+
+def _cv_col(serie):
+    s = pd.to_numeric(serie, errors="coerce").dropna()
+    if len(s) < 2 or not s.mean():
+        return np.nan
+    return 100 * s.std(ddof=1) / s.mean()
+
+
+def _bloques_hoja_d(reg, blanco, grupos=None, comparar=True):
+    """Contenido del reporte, en bloques independientes del formato de salida.
+
+    Bloques: ("titulo", t) · ("sub2", t) · ("p", t) · ("nota", t) · ("fig", pie, figura)
+             ("tabla", cab, filas, pesos, num_desde, estilos)
+    estilos[i] ∈ {"dato", "banda"}; en una fila «banda» la fila es [texto, tinta, fondo] y ocupa todo el ancho."""
+    import datetime as _dt
+    reg = reg.copy()
+    todos = list(dict.fromkeys(reg.muestra)) if len(reg) else []
+    grupos = [g for g in (grupos or todos) if g in todos]
+    cols = _cols_hoja_d()[:6]          # escala · área · densidad · Feret P90 · % < 0,5 · % 0,5-1
+    ahora = _dt.datetime.now()
+    B = []
+
+    B.append(("titulo", "REPORTE DE RESULTADOS · MIGA"))
+    B.append(("sub2", f"Práctica {PRACTICA} · datos para la Hoja D del libro de registro · "
+                      f"{', '.join(grupos) if grupos else 'sin grupos'} · {ahora:%d/%m/%Y}"))
+    B.append(("p", "Copie en la Hoja D estos valores: el blanco y cada réplica. La media, el recorrido, el CV y "
+                   "la interpretación los calcula el libro. Un guion («—») es un dato no medido: en la Hoja D se "
+                   "escribe NM."))
+
+    # ---------- Tabla única: blanco y réplicas, en el orden de la Hoja D ----------
+    filas, estilos = [], []
+    filas.append(["BLANCO CONTROL (cartulina gris)", "4F81BD", "EEF2F6"]); estilos.append("banda")
+    if blanco:
+        filas.append(["Blanco"] + [_fmt_hd(blanco.get("escala_px_mm" if c == "escala_foto_px_mm" else c), d)
+                                   for c, _, d in cols])
+    else:
+        filas.append(["Blanco"] + ["—"] * len(cols))
+    estilos.append("dato")
+    for k, g in enumerate(grupos):
+        d = reg[reg.muestra == g]
+        tc, fc = BANDAS_GRUPO[(k + 1) % len(BANDAS_GRUPO)]
+        filas.append([g.upper(), tc, fc]); estilos.append("banda")
+        for _, r in d.iterrows():
+            filas.append([str(r.replica)] + [_fmt_hd(r.get(c), dd) for c, _, dd in cols]); estilos.append("dato")
+    w0 = 0.20
+    B.append(("tabla", ["Muestra"] + [n for _, n, _ in cols], filas,
+              [w0] + [(1 - w0) / len(cols)] * len(cols), 1, estilos))
+
+    # ---------- Una línea de validación ----------
+    est_b = (blanco or {}).get("estado", "PENDIENTE")
+    if not blanco:
+        linea = "Blanco sin analizar: todas las lecturas quedan pendientes."
+    elif est_b in ("OK", "VÁLIDO"):
+        linea = f"Blanco válido (área alveolar {_fmt_hd(blanco.get('area_alveolar_%'), 1)} %, criterio ≤ {_es(BLANCO_AREA_OK)} %)."
+    else:
+        linea = (f"Blanco en {est_b}: {str(blanco.get('motivo', '')).rstrip('.')}. "
+                 f"Los grupos heredan ese estado hasta que se repita; menciónelo en el informe.")
+    otros = [g for g in grupos if _peor([str(reg[reg.muestra == g].estado_sin_blanco.iloc[0]), "OK"]) not in ("OK", "VÁLIDO")]
+    if otros:
+        linea += " Con aviso propio en la validación por réplicas: " + ", ".join(otros) + "."
+    B.append(("nota", linea))
+
+    # ---------- Gráficas de la comparación (variables principales) ----------
+    if comparar and len(grupos) >= 2:
+        import matplotlib.pyplot as _plt
+        r = comparar_grupos(reg, blanco, grupos, None)
+        for k, f in r["figs"].items():
+            if k not in ("principales", "heterogeneidad_rep", "matriz") and f is not None:
+                _plt.close(f)
+        B.append(("fig", "Figura 1. Densidad alveolar y área alveolar por grupo. La LSD es una referencia de "
+                         "lectura, no una prueba de significación.", r["figs"]["principales"]))
+        B.append(("fig", "Figura 2. Heterogeneidad: CV entre las réplicas de cada pieza. La línea discontinua "
+                         "marca el límite de aceptación de la Hoja D.", r["figs"]["heterogeneidad_rep"]))
+        if r["figs"].get("matriz") is not None:
+            B.append(("fig", "Figura 3. Diferencia de medias de densidad entre cada par de grupos y cuántas veces "
+                             "la LSD vale esa diferencia. El color gradúa la magnitud; no marca un umbral.",
+                      r["figs"]["matriz"]))
+    elif comparar:
+        B.append(("nota", "Las gráficas de comparación necesitan al menos dos grupos."))
+    else:
+        B.append(("nota", "Las gráficas de comparación van en el reporte conjunto de la descarga."))
+    pie = f"Reporte de resultados · {PRACTICA} · {ahora:%d/%m/%Y %H:%M}"
+    return B, pie
+
+
+def _fig_a_png(fig, dpi=170):
+    import io
+    import matplotlib.pyplot as _plt
+    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=dpi, facecolor="white", bbox_inches="tight")
+    w, h = fig.get_size_inches(); _plt.close(fig); buf.seek(0)
+    return buf, (h / w)
+
+
+COLOR_ESTADO = {"OK": "E5F0DC", "VÁLIDO": "E5F0DC", "REVISAR": "FDF1CF", "PENDIENTE": "EDEDED",
+                "NO VÁLIDO": "FBE9E9"}
+
+
+# ---------- Salida en PDF (la que el estudiante imprime y adjunta) ----------
+def reporte_hoja_d_pdf(ruta, reg, blanco, grupos=None, comparar=True):
+    if not _asegurar("reportlab", "reportlab"):
+        raise RuntimeError("no se pudo instalar reportlab")
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Table,
+                                    TableStyle, KeepTogether, ListFlowable, ListItem)
+    from reportlab.platypus import Image as RLImage
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    B, pie = _bloques_hoja_d(reg, blanco, grupos, comparar)
+    try:                                   # tipografía con acentos y «×» completos
+        fdir = "/usr/share/fonts/truetype/dejavu"
+        pdfmetrics.registerFont(TTFont("Sans", os.path.join(fdir, "DejaVuSans.ttf")))
+        pdfmetrics.registerFont(TTFont("Sans-B", os.path.join(fdir, "DejaVuSans-Bold.ttf")))
+        pdfmetrics.registerFont(TTFont("Sans-I", os.path.join(fdir, "DejaVuSans-Oblique.ttf")))
+        pdfmetrics.registerFont(TTFont("Sans-BI", os.path.join(fdir, "DejaVuSans-BoldOblique.ttf")))
+        from reportlab.lib.fonts import addMapping
+        addMapping("Sans", 0, 0, "Sans"); addMapping("Sans", 1, 0, "Sans-B")
+        addMapping("Sans", 0, 1, "Sans-I"); addMapping("Sans", 1, 1, "Sans-BI")
+        F, FB, FI = "Sans", "Sans-B", "Sans-I"
+    except Exception:
+        F, FB, FI = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+    C = lambda h: colors.HexColor("#" + h)
+    sty = {
+        "p": ParagraphStyle("p", fontName=F, fontSize=8.8, leading=12.2, textColor=C(TINTA_D),
+                            alignment=TA_JUSTIFY, spaceAfter=5),
+        "tit": ParagraphStyle("tit", fontName=FB, fontSize=15, leading=18, textColor=C(ROJO), alignment=TA_CENTER),
+        "sub": ParagraphStyle("sub", fontName=FB, fontSize=10, leading=13, textColor=C(TINTA_D),
+                              alignment=TA_CENTER, spaceAfter=2),
+        "sub2": ParagraphStyle("sub2", fontName=FI, fontSize=8.5, leading=11, textColor=C(SUAVE),
+                               alignment=TA_CENTER, spaceAfter=9),
+        "nota": ParagraphStyle("nota", fontName=FI, fontSize=7.8, leading=10.2, textColor=C(SUAVE),
+                               alignment=TA_JUSTIFY, spaceAfter=8),
+        "c": ParagraphStyle("c", fontName=F, fontSize=7.4, leading=9.2, textColor=C(TINTA_D), alignment=TA_CENTER),
+        "cl": ParagraphStyle("cl", fontName=F, fontSize=7.4, leading=9.2, textColor=C(TINTA_D)),
+        "cb": ParagraphStyle("cb", fontName=FB, fontSize=7.4, leading=9.2, textColor=C(TINTA_D)),
+        "ch": ParagraphStyle("ch", fontName=FB, fontSize=7.2, leading=8.8, textColor=colors.white,
+                             alignment=TA_CENTER),
+    }
+    esc = lambda t: str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    md = lambda t: "".join(f"<b>{x}</b>" if b else x for x, b in _trozos(esc(t)))
+    br = lambda t: esc(t).replace("\n", "<br/>")
+
+    W_, H_ = landscape(A4); mx = 1.3 * cm; util = W_ - 2 * mx
+    logo = ImageReader(_logo()); lw, lh = logo.getSize()
+
+    def pagina(cv, doc_):
+        cv.saveState()
+        alto = 1.25 * cm
+        cv.drawImage(logo, mx, H_ - 0.65 * cm - alto, width=alto * lw / lh, height=alto, mask="auto")
+        x = W_ - mx
+        cv.setFont(FB, 8.2); w2 = cv.stringWidth(AUTORIA[1], FB, 8.2)
+        cv.setFillColor(C(TINTA_D)); cv.drawRightString(x, H_ - 1.0 * cm, AUTORIA[1])
+        cv.setFillColor(C(ROJO)); cv.drawRightString(x - w2, H_ - 1.0 * cm, AUTORIA[0])
+        cv.setFont(FI, 8.2); cv.setFillColor(C(TINTA_D)); cv.drawRightString(x, H_ - 1.4 * cm, DEPARTAMENTO)
+        cv.setFont(F, 7); cv.setFillColor(C(SUAVE))
+        cv.drawString(mx, 0.85 * cm, pie); cv.drawRightString(W_ - mx, 0.85 * cm, f"Página {doc_.page}")
+        cv.setStrokeColor(C("D9D7CF")); cv.setLineWidth(0.5); cv.line(mx, 1.1 * cm, W_ - mx, 1.1 * cm)
+        cv.restoreState()
+
+    def encabezado(codigo, titulo):
+        t = Table([[Paragraph(f"<font name='{FB}' size=12 color='#{ROJO}'>{esc(codigo)}</font>"
+                              f"<font name='{FB}' size=9.5 color='#{ROJO}'>  → {esc(titulo).upper()}</font>",
+                              ParagraphStyle("h", fontName=FB, leading=14))]], colWidths=[util])
+        t.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.9, C(ROJO)), ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 2), ("TOPPADDING", (0, 0), (-1, -1), 6)]))
+        return t
+
+    def tabla(cab, filas, pesos, num_desde, estilos):
+        anchos = [util * p for p in pesos]
+        datos = [[Paragraph(br(h), sty["ch"]) for h in cab]]
+        est = [("BACKGROUND", (0, 0), (-1, 0), C(ROJO)), ("GRID", (0, 0), (-1, -1), 0.4, C("D9D7CF")),
+               ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 2.6),
+               ("BOTTOMPADDING", (0, 0), (-1, -1), 2.6)]
+        for i, fila in enumerate(filas, start=1):
+            e = (estilos[i - 1] if estilos else "dato")
+            if e == "banda":
+                texto, tinta, fondo = (list(fila) + ["C00000", "FBE0D6"])[:3]
+                datos.append([Paragraph(f"<font name='{FB}' size=7.8 color='#{tinta}'>{esc(texto)}</font>",
+                                        sty["cl"])] + [""] * (len(cab) - 1))
+                est += [("SPAN", (0, i), (-1, i)), ("BACKGROUND", (0, i), (-1, i), C(fondo))]
+                continue
+            fila = list(fila) + [""] * (len(cab) - len(fila))
+            datos.append([Paragraph(br(v), sty["cb"] if j == 0 and e == "resumen" else
+                                    (sty["cl"] if j < num_desde else sty["c"]))
+                          for j, v in enumerate(fila)])
+            if e == "resumen":
+                est.append(("BACKGROUND", (0, i), (-1, i), C("F2F2F2")))
+            elif isinstance(e, dict):
+                for j, col in e.items():
+                    if j < len(cab):
+                        est.append(("BACKGROUND", (j, i), (j, i), C(col)))
+        t = Table(datos, colWidths=anchos, repeatRows=1)
+        t.setStyle(TableStyle(est))
+        return t
+
+    flujo = []; pendiente = None
+    for b in B:
+        tipo = b[0]; bloque = []
+        if tipo == "titulo":
+            bloque = [Paragraph(esc(b[1]), sty["tit"]), Spacer(1, 3)]
+        elif tipo in ("sub", "sub2"):
+            bloque = [Paragraph(esc(b[1]), sty[tipo])]
+        elif tipo == "h":
+            pendiente = encabezado(b[1], b[2]); continue
+        elif tipo == "p":
+            bloque = [Paragraph(md(b[1]), sty["p"])]
+        elif tipo == "nota":
+            bloque = [Paragraph(md(b[1]), sty["nota"])]
+        elif tipo == "lista":
+            bloque = [ListFlowable([ListItem(Paragraph(md(t), sty["p"]), leftIndent=12, value="•") for t in b[1]],
+                                   bulletType="bullet", start="•", leftIndent=12, bulletFontSize=7,
+                                   bulletColor=C(ROJO)), Spacer(1, 3)]
+        elif tipo == "tabla":
+            _, cab, filas, pesos, num_desde, estilos = b
+            bloque = [tabla(cab, filas, pesos, num_desde, estilos), Spacer(1, 7)]
+        elif tipo == "fig":
+            buf, prop = _fig_a_png(b[2])
+            w_img = min(util * 0.84, 8.4 * cm / prop)       # cada figura cabe en media página
+            bloque = [KeepTogether([RLImage(buf, width=w_img, height=w_img * prop), Spacer(1, 2),
+                                    Paragraph(md(b[1]), sty["nota"])])]
+        if pendiente is not None:
+            # Un KeepTogether con una tabla más alta que la página deja media hoja en blanco: la
+            # tabla se deja partir y su cabecera se repite sola (repeatRows).
+            if tipo == "tabla":
+                flujo += [pendiente, Spacer(1, 3)] + bloque
+            else:
+                flujo.append(KeepTogether([pendiente] + bloque[:1])); flujo += bloque[1:]
+            pendiente = None
+        else:
+            flujo += bloque
+    doc_ = BaseDocTemplate(ruta, pagesize=landscape(A4), leftMargin=mx, rightMargin=mx, topMargin=2.2 * cm,
+                           bottomMargin=1.5 * cm, title="Reporte de resultados · Miga", author=AUTORIA[1],
+                           creator="Aplicativo de análisis alveolar · UBU", subject="Panificación y Pastelería (9057)")
+    doc_.addPageTemplates([PageTemplate(id="p", frames=[Frame(mx, 1.5 * cm, util, H_ - 3.7 * cm, id="f",
+                                                              leftPadding=0, rightPadding=0, topPadding=0,
+                                                              bottomPadding=0)], onPage=pagina)])
+    doc_.build(flujo)
+    return ruta
+
+
+# ---------- Salida en Word (editable, mismo contenido) ----------
 def reporte_hoja_d(ruta, reg, blanco, grupos=None, comparar=True):
-    """Reporte de las salidas del aplicativo ordenado como la Hoja D · Miga: D.1 blanco, D.2 réplicas con media y
-    recorrido, D.3 validación por grupo y D.4 lectura de cada par. Solo transcribe datos: no interpreta."""
     if not _asegurar("python-docx", "docx"):
         raise RuntimeError("no se pudo instalar python-docx")
-    import datetime as _dt
     from docx import Document
     from docx.shared import Pt, Cm, RGBColor, Emu
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.section import WD_ORIENT
     from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
-    reg = reg.copy()
-    todos = list(dict.fromkeys(reg.muestra)) if len(reg) else []
-    grupos = [g for g in (grupos or todos) if g in todos]
+    B, pie = _bloques_hoja_d(reg, blanco, grupos, comparar)
     rgb = lambda h: RGBColor.from_string(h)
     doc = Document()
     st = doc.styles["Normal"]; st.font.name = "Calibri"; st.font.size = Pt(10); st.font.color.rgb = rgb(TINTA_D)
     st.element.rPr.rFonts.set(qn("w:eastAsia"), "Calibri")
     st.paragraph_format.space_after = Pt(3); st.paragraph_format.line_spacing = 1.08
     sec = doc.sections[0]
-    sec.page_width, sec.page_height = Cm(21), Cm(29.7)
-    sec.left_margin = sec.right_margin = Cm(1.5); sec.top_margin = Cm(2.5); sec.bottom_margin = Cm(1.5)
-    sec.header_distance = Cm(0.7); sec.footer_distance = Cm(0.6)
+    sec.orientation = WD_ORIENT.LANDSCAPE
+    sec.page_width, sec.page_height = Cm(29.7), Cm(21)
+    sec.left_margin = sec.right_margin = Cm(1.3); sec.top_margin = Cm(2.2); sec.bottom_margin = Cm(1.3)
+    sec.header_distance = Cm(0.6); sec.footer_distance = Cm(0.5)
     util = sec.page_width - sec.left_margin - sec.right_margin
 
     def _antes_de(padre, elem, sucesores):
-        """Inserta respetando el orden del esquema OOXML (Word puede dar el archivo por dañado si no)."""
+        """Inserta respetando el orden del esquema OOXML (Word da el archivo por dañado si no)."""
         for hijo in padre:
             if hijo.tag in [qn(x) for x in sucesores]:
                 hijo.addprevious(elem); return
@@ -2322,13 +2729,19 @@ def reporte_hoja_d(ruta, reg, blanco, grupos=None, comparar=True):
             if val != "nil":
                 e.set(qn("w:sz"), "4"); e.set(qn("w:color"), color)
             b.append(e)
-        _antes_de(t._tbl.tblPr, b, ("w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook", "w:tblCaption", "w:tblDescription"))
+        _antes_de(t._tbl.tblPr, b, ("w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook", "w:tblCaption",
+                                    "w:tblDescription"))
 
     def txt(p, texto, size=None, color=None, bold=False, italic=False):
-        r = p.add_run(texto); r.bold = bold; r.italic = italic
+        r = p.add_run(str(texto)); r.bold = bold; r.italic = italic
         if size: r.font.size = Pt(size)
         if color: r.font.color.rgb = rgb(color)
         return r
+
+    def rico(p, texto, size=None, color=None, italic=False):
+        """Pinta **negrita** dentro de un párrafo."""
+        for trozo, negrita in _trozos(str(texto)):
+            txt(p, trozo, size, color, bold=negrita, italic=italic)
 
     def campo(p, codigo):
         r = p.add_run(); f1 = OxmlElement("w:fldChar"); f1.set(qn("w:fldCharType"), "begin")
@@ -2336,180 +2749,99 @@ def reporte_hoja_d(ruta, reg, blanco, grupos=None, comparar=True):
         f2 = OxmlElement("w:fldChar"); f2.set(qn("w:fldCharType"), "end")
         r._r.append(f1); r._r.append(it); r._r.append(f2); r.font.size = Pt(7.5); r.font.color.rgb = rgb(SUAVE)
 
-    def h(codigo, titulo):
-        p = doc.add_paragraph(); p.paragraph_format.space_before = Pt(7); p.paragraph_format.space_after = Pt(3)
-        p.paragraph_format.keep_with_next = True
-        txt(p, codigo + " ", 12, ROJO, bold=True); txt(p, "→ " + titulo.upper(), 9.5, ROJO, bold=True)
-
-    def nota(texto):
-        p = doc.add_paragraph(); txt(p, texto, 8.5, SUAVE, italic=True); p.paragraph_format.space_after = Pt(6)
-        return p
-
-    def tabla(cab, filas, anchos, num_desde=1, size=8.5, estilos=None):
-        t = doc.add_table(rows=1 + len(filas), cols=len(cab)); bordes(t); t.alignment = WD_TABLE_ALIGNMENT.CENTER
-        t.autofit = False
-        anchos = [Emu(int(w)) for w in anchos]
+    def tabla(cab, filas, pesos, num_desde, estilos, size=7.8):
+        t = doc.add_table(rows=1 + len(filas), cols=len(cab)); bordes(t)
+        t.alignment = WD_TABLE_ALIGNMENT.CENTER; t.autofit = False
+        anchos = [Emu(int(util * p)) for p in pesos]
         for j, w in enumerate(anchos):
             t.columns[j].width = w
-        for i, fila in enumerate([cab] + filas):
-            trPr = t.rows[i]._tr.get_or_add_trPr()
-            cs = OxmlElement("w:cantSplit"); trPr.append(cs)
+        for i, fila in enumerate([cab] + list(filas)):
+            trPr = t.rows[i]._tr.get_or_add_trPr(); trPr.append(OxmlElement("w:cantSplit"))
             if i == 0:
-                th = OxmlElement("w:tblHeader"); trPr.append(th)
-            estilo = (estilos[i - 1] if (estilos and i) else None)
-            if estilo == "banda":
+                trPr.append(OxmlElement("w:tblHeader"))
+            e = (estilos[i - 1] if (estilos and i) else "dato")
+            if e == "banda":
+                texto, tinta, fondo = (list(fila) + ["C00000", "FBE0D6"])[:3]
                 c = t.cell(i, 0).merge(t.cell(i, len(cab) - 1)); c.text = ""
-                for extra in c.paragraphs[1:]:          # al fusionar, Word conserva un párrafo vacío por celda
+                for extra in c.paragraphs[1:]:      # al fusionar, Word conserva un párrafo vacío por celda
                     extra._p.getparent().remove(extra._p)
                 p = c.paragraphs[0]; p.paragraph_format.space_after = Pt(0)
-                txt(p, str(fila[0]).upper(), size, fila[1] if len(fila) > 1 else ROJO, bold=True)
-                sombra(c, fila[2] if len(fila) > 2 else "FBE0D6"); continue
+                txt(p, texto, size, tinta, bold=True); sombra(c, fondo)
+                continue
+            fila = list(fila) + [""] * (len(cab) - len(fila))
             for j, v in enumerate(fila):
-                c = t.cell(i, j); c.width = anchos[j]; c.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                c = t.cell(i, j); c.width = anchos[j]
+                c.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 p = c.paragraphs[0]; p.paragraph_format.space_after = Pt(0)
-                if i and j >= num_desde:
-                    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                txt(p, "" if v is None else str(v), size, bold=(i == 0 or estilo == "resumen" or (j == 0 and estilo != "texto")))
                 if i == 0:
-                    sombra(c, "D9D9D9")
-                elif estilo == "resumen":
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                elif j >= num_desde:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                txt(p, str(v).replace("\n", " "), size,
+                    bold=(i == 0 or (j == 0 and e == "resumen")))
+                if i == 0:
+                    sombra(c, "C00000"); p.runs[0].font.color.rgb = rgb("FFFFFF")
+                elif e == "resumen":
                     sombra(c, "F2F2F2")
-                elif isinstance(estilo, dict) and j in estilo:
-                    sombra(c, estilo[j])
-        sep = doc.add_paragraph(); sep.paragraph_format.space_after = Pt(0)
-        sep.paragraph_format.line_spacing = 0.6
-        return t
+                elif isinstance(e, dict) and j in e:
+                    sombra(c, e[j])
+        sep = doc.add_paragraph(); sep.paragraph_format.space_after = Pt(0); sep.paragraph_format.line_spacing = 0.6
 
-    color_estado = {"OK": "E5F0DC", "VÁLIDO": "E5F0DC", "REVISAR": "FDF1CF", "PENDIENTE": "EDEDED", "NO VÁLIDO": "FBE9E9"}
-    fmt = lambda v, d=1: "—" if v is None or (isinstance(v, float) and np.isnan(v)) else _es(v, d)
-
-    # Cabecera y pie (como el resto de documentos de la asignatura)
+    # Cabecera y pie, como el resto de documentos de la asignatura
     hdr = sec.header; ht = hdr.add_table(rows=1, cols=2, width=util); bordes(ht, "nil")
     ht.cell(0, 0).width = Cm(7); ht.cell(0, 1).width = util - Cm(7)
     ht.cell(0, 0).paragraphs[0].add_run().add_picture(_logo(), width=Cm(4.2))
     p = ht.cell(0, 1).paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     txt(p, AUTORIA[0], 8.5, ROJO, bold=True); txt(p, AUTORIA[1], 8.5, bold=True, italic=True)
-    p2 = ht.cell(0, 1).add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.RIGHT; txt(p2, DEPARTAMENTO, 8.5, italic=True)
+    p2 = ht.cell(0, 1).add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    txt(p2, DEPARTAMENTO, 8.5, italic=True)
     if hdr.paragraphs and not hdr.paragraphs[0].text:
         hdr.paragraphs[0]._p.getparent().remove(hdr.paragraphs[0]._p)
-    ahora = _dt.datetime.now()
     fp = sec.footer.paragraphs[0]
-    txt(fp, f"Reporte Hoja D · Miga · {PRACTICA} · generado por el aplicativo el {ahora:%d/%m/%Y %H:%M} · Página ", 7.5, SUAVE)
-    campo(fp, "PAGE"); txt(fp, " de ", 7.5, SUAVE); campo(fp, "NUMPAGES")
+    txt(fp, pie + " · Página ", 7.5, SUAVE); campo(fp, "PAGE"); txt(fp, " de ", 7.5, SUAVE); campo(fp, "NUMPAGES")
 
-    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.paragraph_format.space_after = Pt(2)
-    txt(p, "REPORTE DE RESULTADOS · HOJA D · MIGA", 15, ROJO, bold=True)
-    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.paragraph_format.space_after = Pt(2)
-    txt(p, f"Práctica {PRACTICA} → salidas del aplicativo de análisis alveolar", 10.5, bold=True)
-    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.paragraph_format.space_after = Pt(8)
-    txt(p, f"Grupos: {', '.join(grupos) if grupos else 'ninguno'} · Resolución de análisis {_es(RES_ANALISIS, 0)} px/mm · "
-           f"Zona analizada {_es(LADO_ROI_MM, 0)} × {_es(LADO_ROI_MM, 0)} mm", 9, SUAVE, italic=True)
-    nota("Salidas del aplicativo en el orden de la Hoja D · Miga. El % grandes (100 − finos − medios) y la interpretación "
-         "se hacen en la Hoja D. «—» = dato no medido: en la Hoja D se escribe NM.")
+    for b in B:
+        tipo = b[0]
+        if tipo == "titulo":
+            p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_after = Pt(2); txt(p, b[1], 15, ROJO, bold=True)
+        elif tipo == "sub":
+            p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_after = Pt(2); txt(p, b[1], 10.5, bold=True)
+        elif tipo == "sub2":
+            p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_after = Pt(8); txt(p, b[1], 9, SUAVE, italic=True)
+        elif tipo == "h":
+            p = doc.add_paragraph(); p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(3); p.paragraph_format.keep_with_next = True
+            txt(p, b[1] + " ", 12, ROJO, bold=True); txt(p, "→ " + b[2].upper(), 9.5, ROJO, bold=True)
+        elif tipo == "p":
+            p = doc.add_paragraph(); rico(p, b[1], 9)
+        elif tipo == "nota":
+            p = doc.add_paragraph(); rico(p, b[1], 8.5, SUAVE, italic=True)
+            p.paragraph_format.space_after = Pt(6)
+        elif tipo == "lista":
+            for t in b[1]:
+                p = doc.add_paragraph(style="List Bullet"); rico(p, t, 9)
+        elif tipo == "tabla":
+            _, cab, filas, pesos, num_desde, estilos = b
+            tabla(cab, filas, pesos, num_desde, estilos)
+        elif tipo == "fig":
+            buf, prop = _fig_a_png(b[2])
+            w_img = min(int(util * 0.84), int(Cm(8.4) / prop))
+            p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.keep_with_next = True; p.paragraph_format.space_after = Pt(1)
+            p.add_run().add_picture(buf, width=Emu(w_img))
+            p = doc.add_paragraph(); rico(p, b[1], 8.5, SUAVE, italic=True); p.paragraph_format.space_after = Pt(6)
 
-    # D.1 · Blanco
-    h("D.1", "Blanco control")
-    if blanco:
-        nc = _nombres_clase()
-        fila = ["Blanco (cartulina gris)", fmt(blanco.get("escala_px_mm"), 2), fmt(blanco.get("area_alveolar_%")),
-                fmt(blanco.get("densidad_alv_cm2")), fmt(blanco.get("feret_p90_mm"), 2),
-                fmt(blanco.get(f"% {nc[0]}")), fmt(blanco.get(f"% {nc[1]}"))]
-        w0 = Cm(4.2); wr = (util - w0) / 6
-        tabla(["Muestra", "Escala (px/mm)", "Área alveolar (%)", "Densidad (alv/cm²)", "Feret P90 (mm)",
-               "% < 0,5 mm", "% 0,5–1 mm"], [fila], [w0] + [wr] * 6)
-        p = doc.add_paragraph(); txt(p, "Veredicto del blanco: ", 9.5, bold=True)
-        r = txt(p, blanco.get("estado", "—"), 9.5, bold=True)
-        txt(p, " · " + str(blanco.get("motivo", "")), 9.5)
-        txt(p, f"   (criterio: área alveolar ≤ {_es(BLANCO_AREA_OK)} %)", 8.5, SUAVE, italic=True)
-    else:
-        nota("No se ha analizado el blanco control en esta sesión: en la Hoja D se escribe NM y todas las lecturas "
-             "quedan pendientes.")
-
-    # D.2 · Réplicas por producto
-    h("D.2", "Miga por réplica · salidas del aplicativo")
-    cols = _cols_hoja_d()
-    cab = ["Grupo · réplica"] + [c[1] for c in cols]
-    filas, estilos = [], []
-    bandas = [("4F81BD", "EEF2F6"), (ROJO, "FBE0D6"), ("8F1D1D", "FDF1CF")]
-    for k, g in enumerate(grupos):
-        d = reg[reg.muestra == g]
-        tc, fc = bandas[k % 3]
-        filas.append([g, tc, fc]); estilos.append("banda")
-        for _, r in d.iterrows():
-            filas.append([r.replica] + [fmt(r.get(c), dd) for c, _, dd in cols]); estilos.append("texto")
-        filas.append(["Media"] + [fmt(pd.to_numeric(d[c], errors="coerce").mean(), dd) if c in d else "—"
-                                  for c, _, dd in cols]); estilos.append("resumen")
-        filas.append(["Recorrido (mín–máx)"] + [
-            (f"{fmt(pd.to_numeric(d[c], errors='coerce').min(), dd)}–{fmt(pd.to_numeric(d[c], errors='coerce').max(), dd)}"
-             if c in d else "—") for c, _, dd in cols]); estilos.append("resumen")
-    if grupos:
-        w0 = Cm(3.0); wr = (util - w0) / len(cols)
-        tabla(cab, filas, [w0] + [wr] * len(cols), size=8, estilos=estilos)
-        nota(f"Escala = resolución de la foto original (todas se analizan a {_es(RES_ANALISIS, 0)} px/mm). % finos y % medios: "
-             f"por número de alvéolos; % del área en alvéolos > {_es(LIM_MUY_GRANDES_MM, 0)} mm: por área.")
-    else:
-        nota("No hay grupos analizados.")
-
-    # D.3 · Validación por grupo
-    h("D.3", "Validación y homogeneidad por grupo")
-    est_b = blanco.get("estado", "PENDIENTE") if blanco else "PENDIENTE"
-    filas, estilos = [], []
-    for g in grupos:
-        d = reg[reg.muestra == g]
-        e = _peor([str(d.estado_sin_blanco.iloc[0]), est_b])
-        a = pd.to_numeric(d["area_alveolar_%"], errors="coerce")
-        cv = 100 * a.std(ddof=1) / a.mean() if len(a.dropna()) > 1 and a.mean() else np.nan
-        rv = d["controles_revisar"].dropna().astype(str) if "controles_revisar" in d else pd.Series(dtype=str)
-        rv = rv.iloc[0] if len(rv) and rv.iloc[0].strip() and rv.iloc[0] != "nan" else "ninguno"
-        if est_b != "OK" and est_b != "VÁLIDO":
-            rv = ("Blanco control; " + rv) if rv != "ninguno" else "Blanco control"
-        filas.append([g, e, rv, fmt(cv)]); estilos.append({1: color_estado.get(e, "FFFFFF")})
-    if grupos:
-        tabla(["Grupo", "Estado de validación", "Controles en REVISAR", "CV del área alveolar (%)"], filas,
-              [Cm(3.0), Cm(3.4), util - Cm(9.6), Cm(3.2)], num_desde=3, size=8.5, estilos=estilos)
-        nota("CV (%) = desviación típica de las réplicas ÷ media × 100. Detalle de cada control: hoja «Validacion» del "
-             "Excel del grupo.")
-
-    # D.4 · Comparación
-    h("D.4", "Comparación entre grupos · lectura del aplicativo")
-    if comparar and len(grupos) >= 2:
-        import matplotlib.pyplot as _plt
-        r = comparar_grupos(reg, blanco, grupos, None)
-        for f in r["figs"].values():
-            if f is not None:
-                _plt.close(f)
-        pares = r["pares"]
-        variables = [dict(VARS_COMP)[v] for v in ("area_alveolar_%", "densidad_alv_cm2", "%_area_gt2mm")]
-        filas, estilos = [], []
-        for i, a in enumerate(grupos):
-            for b in grupos[i + 1:]:
-                fila = [f"{a} – {b}"]; col = {}
-                for j, var in enumerate(variables, start=1):
-                    x = pares[(pares.Variable == var) & (((pares["Grupo A"] == a) & (pares["Grupo B"] == b))
-                                                          | ((pares["Grupo A"] == b) & (pares["Grupo B"] == a)))]
-                    if len(x):
-                        lec = str(x.Lectura.iloc[0])
-                        fila.append(f"{lec} · recorridos {x.Recorridos.iloc[0]} · p = {fmt(x['Tukey p ajustado'].iloc[0], 3)}")
-                        col[j] = ("E5F0DC" if lec.startswith("Diferencia sólida") else
-                                  "FDF1CF" if lec.startswith("Indicio") else "FFFFFF")
-                    else:
-                        fila.append("—")
-                filas.append(fila); estilos.append(col)
-        nota("p = Tukey HSD ajustado. Diferencia sólida = recorridos sin solape y p < 0,05. Indicio = solo uno de los dos "
-             "criterios. «No se puede afirmar que difieran» no significa «son iguales».")
-        tabla(["Par", "Área alveolar", "Densidad alveolar", f"% del área en alvéolos > {_es(LIM_MUY_GRANDES_MM, 0)} mm"],
-              filas, [Cm(3.2)] + [(util - Cm(3.2)) / 3] * 3, num_desde=9, size=8, estilos=estilos)
-    elif comparar:
-        nota("Hacen falta al menos 2 grupos para la comparación.")
-    else:
-        nota("La comparación entre grupos se incluye en el reporte de la descarga del paso 5, con todos los grupos.")
-    ult = doc.paragraphs[-1]                      # el párrafo final obligatorio no debe abrir una página vacía
+    ult = doc.paragraphs[-1]                 # el párrafo final obligatorio no debe abrir una página vacía
     if not ult.text:
         ult.paragraph_format.line_spacing = Pt(1); ult.paragraph_format.space_after = Pt(0)
     z = doc.settings.element.find(qn("w:zoom"))
     if z is not None and z.get(qn("w:percent")) is None:
         z.set(qn("w:percent"), "100")
-    doc.core_properties.title = "Reporte Hoja D · Miga"; doc.core_properties.author = AUTORIA[1]
+    doc.core_properties.title = "Reporte de resultados · Miga"; doc.core_properties.author = AUTORIA[1]
+    doc.core_properties.last_modified_by = AUTORIA[1]; doc.core_properties.comments = "Aplicativo de análisis alveolar · UBU"
     doc.save(ruta)
     return ruta
 
@@ -3057,18 +3389,20 @@ class AplicativoAlveolar:
         self.desc_out = W.Output()
         self.panel_comp = W.VBox([
             W.HTML(_paso(4, "Comparación entre grupos")),
-            W.HTML(_nota("Se comparan todos los grupos marcados (por defecto, todos los analizados). La variable "
-                         "primaria es el <b>área alveolar</b>. Dos criterios, con la réplica como unidad: "
-                         "<b>recorridos sin solape</b> (regla del guion) y <b>Tukey HSD</b> (corrige por comparar muchos "
-                         "pares a la vez). Una diferencia es <b>sólida</b> cuando la sostienen los dos.", "info")),
+            W.HTML(_nota("Se comparan todos los grupos marcados (por defecto, todos los analizados). Salen dos "
+                         "lecturas: <b>el efecto de la fórmula</b> (media ± DE de cada grupo, con la barra roja de "
+                         "la LSD como referencia) y <b>la heterogeneidad por técnica</b> (cuánto varían entre sí "
+                         "las tres réplicas de una misma pieza). La variable principal es la <b>densidad "
+                         "alveolar</b>. La LSD no es una prueba: dos medias más separadas que ella destacan sobre la "
+                         "variación entre réplicas, y la interpretación la hace usted.", "info")),
             self.comp_lista, self.caja_sel_comp,
             W.HBox([self.btn_comparar, self.btn_vaciar], layout=W.Layout(flex_flow="row wrap", margin="6px 0 0")),
             self.comp_estado, self.comp_out,
             W.HTML(_paso(5, "Descargas")),
-            W.HTML(_nota("Marque los resultados que quiere descargar: se entregan juntos en un solo ZIP, con una "
-                         "carpeta por muestra. El <b>Reporte Hoja D · Miga</b> (Word) reúne, en el orden de la hoja de "
-                         "registro, el blanco, las réplicas con media y recorrido, la validación y la lectura de cada "
-                         "par de los grupos marcados.", "info")),
+            W.HTML(_nota("Marque lo que necesite: todo sale junto en un solo ZIP, con una carpeta por grupo. "
+                         "Para completar el libro de registro basta con el <b>Reporte de resultados · Miga</b> "
+                         "(PDF y Word): trae el blanco, las réplicas de cada grupo y las gráficas de la "
+                         "comparación. El libro calcula las medias, el recorrido y el CV.", "info")),
             self.caja_sel_desc, self.btn_desc_sel, self.desc_out,
             W.HTML("<div style='font-size:12px;color:#5f5e58;background:#ffffff;margin:10px 0 4px'>Si la sesión de "
                    "Colab se reinició y perdió el registro, recupérelo con los ZIP que ya descargó:</div>"),
@@ -3102,7 +3436,7 @@ class AplicativoAlveolar:
         if glob.glob(os.path.join(comp, "*")):
             out.append(("comp", "Comparación entre grupos", comp))
         if len(reg):
-            out.insert(0, ("reporte", "Reporte Hoja D · Miga (Word, todos los grupos marcados)", None))
+            out.insert(0, ("reporte", "Reporte de resultados · Miga (PDF y Word, todos los grupos marcados)", None))
         return out
 
     def _refrescar(self):
@@ -3162,34 +3496,50 @@ class AplicativoAlveolar:
                   + ", ".join(f"{g} {_es(x)}" for g, x in info["resoluciones"].items())
                   + ". La densidad y los % por clase dependen de la resolución: compárelos solo entre grupos con la "
                   "misma. El área alveolar es mucho menos sensible.", "aviso")
-        pa = info["anova"].get(VAR_PRIMARIA, np.nan)
-        _html(f"<b>{info['n_grupos']} grupos · {info['n_pares']} pares.</b> ANOVA del área alveolar: "
-              f"p = {_es(pa, 3) if not np.isnan(pa) else 'no calculable'}. Con la regla de recorridos y "
-              f"{info['n_pares']} pares, si no hubiera ninguna diferencia real cabría esperar unas "
-              f"<b>{_es(info['falsos_esperados'])}</b> «sin solape» por azar (p = 0,10 por par); por eso se exige "
-              "también Tukey para hablar de diferencia sólida.<br><b>Alcance:</b> las 3 réplicas son rebanadas de "
-              "una misma pieza; las diferencias describen esas piezas de esta sesión, no la receta en general.",
-              "info")
-        for k, t in (("variables", "Figura 1. Comparación por variable"),
-                     ("matriz", "Figura 2. Matriz de pares de la variable primaria"),
-                     ("distribucion", "Figura 3. Distribución del área alveolar por tamaño")):
+        nom_prim = info["nombre_primaria"]
+        L = (info["lsd"].get(VAR_PRIMARIA) or {})
+        if np.isfinite(L.get("tipica", np.nan)):
+            regla = (f"La <b>LSD típica</b> de la {nom_prim.lower()} vale <b>{_es(L['tipica'], 1)}</b> "
+                     f"(DE entre réplicas {_es(L['de_tipica'], 1)}). Dos medias que se separen más que eso destacan "
+                     "sobre la variabilidad entre réplicas de esta sesión; si se separan menos, la diferencia queda "
+                     "dentro de esa variabilidad. Cada par tiene su propia LSD, en la tabla: un par en el que una "
+                     "pieza salió irregular exige más separación que uno de dos piezas uniformes.")
+        else:
+            regla = ("No se ha podido calcular la LSD (hacen falta al menos dos réplicas por grupo). Lea las medias "
+                     "con su DE y con los recorridos.")
+        _html(f"<b>{info['n_grupos']} grupos · {info['n_pares']} pares.</b> Variable primaria: "
+              f"<b>{nom_prim.lower()}</b>. {regla}<br>"
+              "La LSD es una <b>regla de lectura</b>, no un veredicto: el aplicativo no declara diferencias "
+              "«significativas» ni agrupa los productos. Esa interpretación la hace usted, con la magnitud de la "
+              "diferencia, la DE de cada grupo y lo que sabe de la elaboración.<br><b>Alcance:</b> las 3 réplicas "
+              "son rebanadas de una misma pieza, así que describen esas piezas de esta sesión, no la receta en "
+              "general.", "info")
+        for k, t in (("variables", "Figura 1. Medias ± DE por grupo, con la barra-patrón de la LSD"),
+                     ("heterogeneidad", "Figura 2. Heterogeneidad entre réplicas (efecto de la técnica)"),
+                     ("matriz", f"Figura 3. Matriz de pares · {info['nombre_primaria'].lower()}"),
+                     ("distribucion", "Figura 4. Distribución del área alveolar por tamaño")):
             if r["figs"].get(k) is not None:
                 display(HTML(f"<div style='font-weight:700;color:#1f2328;background:#ffffff;margin:10px 0 2px'>{t}</div>"))
                 display(r["figs"][k])
                 plt.close(r["figs"][k])
         cols = ["Grupo", "n réplicas", "Estado"] + [c for c in r["resumen"].columns
-                                                     if c.startswith(("Área alveolar", "D50"))]
+                                                     if c.startswith(("Densidad", "Área alveolar"))]
         display(HTML("<div style='font-weight:700;color:#1f2328;background:#ffffff;margin:12px 0 4px'>"
-                     "Resumen por grupo (variables de área y tamaño; el Excel de la comparación incluye todas)</div>"))
+                     "1 · Efecto de la fórmula: media ± DE por grupo <span style='font-weight:400;color:#5f5e58'>"
+                     "(el Excel de la comparación incluye todas las variables)</span></div>"))
         display(HTML(html_tabla(r["resumen"][cols], col_estado="Estado")))
-        prim = r["pares"][r["pares"].Variable == dict(VARS_COMP)[VAR_PRIMARIA]]
         display(HTML("<div style='font-weight:700;color:#1f2328;background:#ffffff;margin:12px 0 4px'>"
-                     "Pares · área alveolar (variable primaria)</div>"))
+                     "2 · Heterogeneidad por técnica: dispersión entre las réplicas de cada pieza</div>"))
+        display(HTML(html_tabla(r["heterogeneidad"].drop(columns=["_ok"]), col_estado="Estado")))
+        prim = r["pares"][r["pares"].Variable == nom_prim]
+        display(HTML("<div style='font-weight:700;color:#1f2328;background:#ffffff;margin:12px 0 4px'>"
+                     f"3 · Pares · {nom_prim.lower()} (variable primaria)</div>"))
         display(HTML(html_tabla(prim.drop(columns="Variable"))))
         otras = W.Output()
         with otras:
-            display(HTML(html_tabla(r["pares"][r["pares"].Variable != dict(VARS_COMP)[VAR_PRIMARIA]])))
-        ac = W.Accordion(children=[otras]); ac.set_title(0, "Pares · densidad, D50 y Feret P90 (secundarias)")
+            display(HTML(html_tabla(r["pares"][r["pares"].Variable != nom_prim])))
+        ac = W.Accordion(children=[otras])
+        ac.set_title(0, "Pares · área alveolar, D50, Feret P90 y % del área en alvéolos > 2 mm")
         ac.selected_index = None
         display(ac)
 
@@ -3204,13 +3554,16 @@ class AplicativoAlveolar:
         with zipfile.ZipFile(ruta, "w", zipfile.ZIP_DEFLATED) as z:
             for clave, etiqueta, origen in elegidos:
                 if clave == "reporte":
-                    rep = os.path.join(REGISTRO_DIR, "Reporte_Hoja_D_miga.docx")
-                    try:
-                        reporte_hoja_d(rep, registro_cargar(), blanco_cargar(), grupos)
-                        z.write(rep, os.path.basename(rep))
-                    except Exception as e:
-                        with self.desc_out:
-                            _html(f"⚠ No se pudo generar el reporte de la Hoja D ({e}).", "aviso")
+                    r_, b_ = registro_cargar(), blanco_cargar()
+                    for ext, fn in (("pdf", reporte_hoja_d_pdf), ("docx", reporte_hoja_d)):
+                        rep = os.path.join(REGISTRO_DIR, f"Reporte_resultados_miga.{ext}")
+                        try:
+                            fn(rep, r_, b_, grupos)
+                            z.write(rep, os.path.basename(rep))
+                        except Exception as e:
+                            with self.desc_out:
+                                _html(f"⚠ No se pudo generar el reporte de resultados en {ext.upper()} ({e}).",
+                                      "aviso")
                     continue
                 carpeta = _archivo_seguro(etiqueta.split(" (")[0])
                 if os.path.isfile(origen):

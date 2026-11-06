@@ -1,12 +1,12 @@
 {
   "aplicativo": "Análisis alveolar de miga · PR-3",
-  "version": "1.0",
-  "fecha": "2026-10-23",
+  "version": "1.1",
+  "fecha": "2026-11-06",
   "archivo": "aplicativo_analisis_alveolar_PR3.py",
   "cambios": [
-    "Primera versión publicada para los estudiantes.",
-    "Blanco control y validación por réplicas; grupos y réplicas con nombre libre.",
-    "Comparación entre grupos con recorridos y Tukey HSD; % del área en alvéolos > 2 mm.",
-    "Reporte Hoja D · Miga en Word; descarga sin archivos CSV."
+    "Comparación entre grupos: media ± desviación estándar de cada grupo, con sus tres réplicas a la vista.",
+    "Nueva lectura de heterogeneidad: cuánto varían entre sí las tres réplicas de una misma pieza.",
+    "La densidad alveolar pasa a variable principal; el área alveolar se lee a su lado.",
+    "Reporte de resultados · Miga en PDF y Word, con los datos de la Hoja D y las gráficas de la comparación."
   ]
 }
